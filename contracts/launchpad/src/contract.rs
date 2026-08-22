@@ -94,6 +94,7 @@ mod iface {
             royalty_receiver: Address,
             platform_fee_receiver: Address,
             platform_fee_bps: u32,
+            network_passphrase: String,
         );
         fn upgrade(env: Env, new_wasm_hash: BytesN<32>);
     }
@@ -110,6 +111,7 @@ mod iface {
             royalty_receiver: Address,
             platform_fee_receiver: Address,
             platform_fee_bps: u32,
+            network_passphrase: String,
         );
         fn upgrade(env: Env, new_wasm_hash: BytesN<32>);
     }
@@ -230,6 +232,16 @@ fn check_sufficient_fee(env: &Env, creator: &Address, currency: &Address, deploy
             errors.push_back(Error::InsufficientFee);
         }
     }
+}
+
+/// Converts a `Vec<Error>` into `Vec<u32>` (discriminant values) for
+/// storage in `PreflightResult.errors`, which must satisfy `SorobanArbitrary`.
+fn error_codes(env: &Env, errs: Vec<Error>) -> Vec<u32> {
+    let mut codes: Vec<u32> = Vec::new(env);
+    for e in errs.iter() {
+        codes.push_back(e as u32);
+    }
+    codes
 }
 
 #[contract]
@@ -519,7 +531,7 @@ impl Launchpad {
             required_fee: deploy_fee,
             platform_fee_bps,
             currency,
-            errors,
+            errors: error_codes(&env, errors),
         }
     }
 
@@ -616,7 +628,7 @@ impl Launchpad {
             required_fee: deploy_fee,
             platform_fee_bps,
             currency,
-            errors,
+            errors: error_codes(&env, errors),
         }
     }
 
@@ -636,6 +648,7 @@ impl Launchpad {
         royalty_receiver: Address,
         platform_fee_bps: u32,
         salt: BytesN<32>,
+        network_passphrase: String,
     ) -> Result<Address, Error> {
         storage::extend_instance_ttl(&env);
         creator.require_auth();
@@ -674,6 +687,7 @@ impl Launchpad {
             &royalty_receiver,
             &platform_fee_receiver,
             &platform_fee_bps,
+            &network_passphrase,
         );
 
         storage::mark_salt_used(&env, &secure_salt);
@@ -729,7 +743,7 @@ impl Launchpad {
             required_fee: deploy_fee,
             platform_fee_bps,
             currency,
-            errors,
+            errors: error_codes(&env, errors),
         }
     }
 
@@ -744,6 +758,7 @@ impl Launchpad {
         royalty_receiver: Address,
         platform_fee_bps: u32,
         salt: BytesN<32>,
+        network_passphrase: String,
     ) -> Result<Address, Error> {
         storage::extend_instance_ttl(&env);
         creator.require_auth();
@@ -778,6 +793,7 @@ impl Launchpad {
             &royalty_receiver,
             &platform_fee_receiver,
             &platform_fee_bps,
+            &network_passphrase,
         );
 
         storage::mark_salt_used(&env, &secure_salt);
@@ -830,7 +846,7 @@ impl Launchpad {
             required_fee: deploy_fee,
             platform_fee_bps,
             currency,
-            errors,
+            errors: error_codes(&env, errors),
         }
     }
 
@@ -1026,10 +1042,5 @@ impl Launchpad {
 
     pub fn wasm_version(env: Env) -> u32 {
         storage::wasm_version(&env)
-    }
-
-    /// Semantic version string for this contract.
-    pub fn version(env: Env) -> soroban_sdk::String {
-        soroban_sdk::String::from_str(&env, CONTRACT_VERSION)
     }
 }

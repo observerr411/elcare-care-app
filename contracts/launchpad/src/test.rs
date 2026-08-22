@@ -11,6 +11,8 @@ use soroban_sdk::{
 
 use crate::{CollectionKind, Error, Launchpad, LaunchpadClient};
 
+const TEST_PASSPHRASE: &str = "Test SDF Network ; September 2015";
+
 fn jump_ledger(env: &Env, delta: u32) {
     env.ledger().with_mut(|li| {
         li.sequence_number += delta;
@@ -250,6 +252,7 @@ fn deploys_lazy_721_twice_with_unique_addresses() {
         &royalty_receiver,
         &0u32,
         &salt_a,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     let deployed_b = client.deploy_lazy_721(
@@ -263,6 +266,7 @@ fn deploys_lazy_721_twice_with_unique_addresses() {
         &royalty_receiver,
         &0u32,
         &salt_b,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     assert_ne!(deployed_a, deployed_b);
@@ -301,6 +305,7 @@ fn deploys_lazy_1155_twice_with_unique_addresses() {
         &royalty_receiver,
         &0u32,
         &salt_a,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     let deployed_b = client.deploy_lazy_1155(
@@ -312,6 +317,7 @@ fn deploys_lazy_1155_twice_with_unique_addresses() {
         &royalty_receiver,
         &0u32,
         &salt_b,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     assert_ne!(deployed_a, deployed_b);
@@ -506,6 +512,7 @@ fn same_salt_different_creators_lazy_721_yields_different_addresses() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     let addr_bob = client.deploy_lazy_721(
@@ -519,6 +526,7 @@ fn same_salt_different_creators_lazy_721_yields_different_addresses() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     assert_ne!(addr_alice, addr_bob);
@@ -547,6 +555,7 @@ fn same_salt_different_creators_lazy_1155_yields_different_addresses() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     let addr_bob = client.deploy_lazy_1155(
@@ -558,6 +567,7 @@ fn same_salt_different_creators_lazy_1155_yields_different_addresses() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     assert_ne!(addr_alice, addr_bob);
@@ -675,6 +685,7 @@ fn front_runner_cannot_grief_lazy_721() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     let addr_alice = client.deploy_lazy_721(
@@ -688,6 +699,7 @@ fn front_runner_cannot_grief_lazy_721() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     assert_ne!(addr_alice, addr_bob);
@@ -716,6 +728,7 @@ fn front_runner_cannot_grief_lazy_1155() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     let addr_alice = client.deploy_lazy_1155(
@@ -727,6 +740,7 @@ fn front_runner_cannot_grief_lazy_1155() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     assert_ne!(addr_alice, addr_bob);
@@ -830,6 +844,7 @@ fn duplicate_creator_salt_lazy_721_reverts() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
     client.deploy_lazy_721(
         &creator,
@@ -842,6 +857,7 @@ fn duplicate_creator_salt_lazy_721_reverts() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 }
 
@@ -866,6 +882,7 @@ fn duplicate_creator_salt_lazy_1155_reverts() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
     client.deploy_lazy_1155(
         &creator,
@@ -876,6 +893,7 @@ fn duplicate_creator_salt_lazy_1155_reverts() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 }
 
@@ -1005,6 +1023,7 @@ fn deploy_without_wasm_hashes_fails_for_all_kinds() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
     assert_eq!(result, Err(Ok(Error::WasmHashNotSet)));
 
@@ -1017,6 +1036,7 @@ fn deploy_without_wasm_hashes_fails_for_all_kinds() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
     assert_eq!(result, Err(Ok(Error::WasmHashNotSet)));
 }
@@ -1271,6 +1291,7 @@ fn deploys_revert_while_paused_for_all_kinds() {
             &royalty_receiver,
             &0u32,
             &BytesN::from_array(&env, &[0xB3u8; 32]),
+            &String::from_str(&env, TEST_PASSPHRASE),
         ),
         Err(Ok(Error::ContractPaused))
     );
@@ -1284,6 +1305,7 @@ fn deploys_revert_while_paused_for_all_kinds() {
             &royalty_receiver,
             &0u32,
             &BytesN::from_array(&env, &[0xB4u8; 32]),
+            &String::from_str(&env, TEST_PASSPHRASE),
         ),
         Err(Ok(Error::ContractPaused))
     );
@@ -1406,6 +1428,7 @@ fn zero_deploy_fee_charges_nothing_for_all_kinds() {
         &royalty_receiver,
         &0u32,
         &BytesN::from_array(&env, &[0xC3u8; 32]),
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
     assert!(!event_with_tag_present(
         &env,
@@ -1422,6 +1445,7 @@ fn zero_deploy_fee_charges_nothing_for_all_kinds() {
         &royalty_receiver,
         &0u32,
         &BytesN::from_array(&env, &[0xC4u8; 32]),
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
     assert!(!event_with_tag_present(
         &env,
@@ -1500,6 +1524,7 @@ fn flat_deploy_fee_charged_for_all_kinds() {
         &royalty_receiver,
         &0u32,
         &BytesN::from_array(&env, &[0xD3u8; 32]),
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
     assert!(event_present(
         &env,
@@ -1518,6 +1543,7 @@ fn flat_deploy_fee_charged_for_all_kinds() {
         &royalty_receiver,
         &0u32,
         &BytesN::from_array(&env, &[0xD4u8; 32]),
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
     assert!(event_present(&env, &client.address, fee_topics, fee_data));
     assert_eq!(token_client.balance(&treasury), 4 * FEE);
@@ -1635,39 +1661,40 @@ fn view_functions_return_correct_values() {
 #[test]
 fn update_collection_wasm_and_upgrade_collection_emit_events() {
     let env = Env::default();
-    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.sequence_number = 1);
+    let (client, _admin, _fee_receiver, creator) = setup_launchpad(&env);
+    // upgrade() inside lazy_721 calls creator.require_auth() from a sub-contract
+    // invocation (launchpad → lazy_721). mock_all_auths() only covers root-level
+    // auth; we need the non-root variant here.
+    env.mock_all_auths_allowing_non_root_auth();
 
-    let launchpad_id = env.register(Launchpad, ());
-    let client = LaunchpadClient::new(&env, &launchpad_id);
-
-    let admin = Address::generate(&env);
-    let fee_receiver = Address::generate(&env);
-    client.initialize(&admin, &fee_receiver, &0i128);
-
-    let wasm_v1 = BytesN::from_array(&env, &[11u8; 32]);
-    let wasm_v2 = BytesN::from_array(&env, &[22u8; 32]);
-    client.set_wasm_hashes(&wasm_v1, &wasm_v1, &wasm_v1, &wasm_v1);
-
-    let creator = Address::generate(&env);
     let currency = Address::generate(&env);
     let royalty_receiver = Address::generate(&env);
-    let deployed = client.deploy_normal_721(
+    let creator_pubkey = BytesN::from_array(&env, &[0xBBu8; 32]);
+    // lazy_721 has an `upgrade` function; normal_721 does not.
+    let deployed = client.deploy_lazy_721(
         &creator,
         &currency,
-        &String::from_str(&env, "Upgradeable 721"),
-        &String::from_str(&env, "UP721"),
+        &creator_pubkey,
+        &String::from_str(&env, "Upgradeable L721"),
+        &String::from_str(&env, "UPL7"),
         &100u64,
         &500u32,
         &royalty_receiver,
         &0u32,
         &BytesN::from_array(&env, &[0xAAu8; 32]),
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
-    client.update_collection_wasm(&CollectionKind::Normal721, &wasm_v2);
-    client.upgrade_collection(&deployed);
+    // Upload a fresh copy of the same WASM as the "new" version.
+    let new_wasm_bytes = wasm_bytes("lazy_mint_erc721");
+    let wasm_v2 = env.deployer().upload_contract_wasm(new_wasm_bytes.as_slice());
 
+    client.update_collection_wasm(&CollectionKind::LazyMint721, &wasm_v2);
     assert!(event_with_tag_present(&env, &client.address, symbol_short!("wasm_upd")));
-    assert!(event_with_tag_present(&env, &client.address, symbol_short!("col_upgd")));
+
+    client.upgrade_collection(&deployed);
+    assert!(event_with_tag_present(&env, &client.address, symbol_short!("col_upgr")));
 }
 
 // ── Collections view tests ──────────────────────────────────────
@@ -1720,6 +1747,7 @@ use soroban_sdk::{contractclient, contracterror, contracttype};
 #[derive(Clone)]
 pub struct MintVoucher {
     pub token_id: u64,
+    pub nonce: u64,
     pub price: i128,
     pub currency: Address,
     pub uri: String,
@@ -1789,6 +1817,7 @@ fn deployed_lazy_721_rejects_invalid_ed25519_signature() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     let lazy_client = Lazy721Client::new(&env, &collection_addr);
@@ -1796,6 +1825,7 @@ fn deployed_lazy_721_rejects_invalid_ed25519_signature() {
     let buyer = Address::generate(&env);
     let voucher = MintVoucher {
         token_id: 1,
+        nonce: 1,
         price: 0,
         currency: Address::generate(&env),
         uri: String::from_str(&env, "ipfs://test"),
@@ -1833,6 +1863,7 @@ fn deployed_lazy_721_rejects_expired_voucher() {
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     let lazy_client = Lazy721Client::new(&env, &collection_addr);
@@ -1844,6 +1875,7 @@ fn deployed_lazy_721_rejects_expired_voucher() {
     let buyer = Address::generate(&env);
     let voucher = MintVoucher {
         token_id: 1,
+        nonce: 1,
         price: 0,
         currency: Address::generate(&env),
         uri: String::from_str(&env, "ipfs://expired"),
@@ -1886,6 +1918,7 @@ fn lazy_721_receives_platform_fee_receiver_and_bps() {
         &royalty_receiver,
         &750u32,
         &BytesN::from_array(&env, &[0xA3u8; 32]),
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     let (child_receiver, child_bps) = FeeInfoClient::new(&env, &addr).platform_fee_info();
@@ -1914,6 +1947,7 @@ fn lazy_1155_receives_platform_fee_receiver_and_bps() {
         &royalty_receiver,
         &900u32,
         &BytesN::from_array(&env, &[0xA4u8; 32]),
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     let (child_receiver, child_bps) = FeeInfoClient::new(&env, &addr).platform_fee_info();
@@ -1947,6 +1981,7 @@ fn lazy_deploy_uses_current_fee_config_receiver() {
         &royalty_receiver,
         &100u32,
         &BytesN::from_array(&env, &[0xA5u8; 32]),
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     let (child_receiver, _) = FeeInfoClient::new(&env, &addr).platform_fee_info();
@@ -2211,6 +2246,7 @@ fn fee_stored_in_collection_record_for_all_types() {
         &royalty_receiver,
         &100u32,
         &BytesN::from_array(&env, &[0xE5u8; 32]),
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
     assert_eq!(
         client.get_collection(&addr_l721).unwrap().platform_fee_bps,
@@ -2226,6 +2262,7 @@ fn fee_stored_in_collection_record_for_all_types() {
         &royalty_receiver,
         &200u32,
         &BytesN::from_array(&env, &[0xE6u8; 32]),
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
     assert_eq!(
         client.get_collection(&addr_l1155).unwrap().platform_fee_bps,
@@ -2269,6 +2306,7 @@ fn invalid_fee_rejected_for_all_deploy_variants() {
             &royalty_receiver,
             &5000u32,
             &BytesN::from_array(&env, &[0xF8u8; 32]),
+            &String::from_str(&env, TEST_PASSPHRASE),
         ),
         Err(Ok(Error::InvalidFeeBps))
     );
@@ -2283,6 +2321,7 @@ fn invalid_fee_rejected_for_all_deploy_variants() {
             &royalty_receiver,
             &3000u32,
             &BytesN::from_array(&env, &[0xF9u8; 32]),
+            &String::from_str(&env, TEST_PASSPHRASE),
         ),
         Err(Ok(Error::InvalidFeeBps))
     );
@@ -2344,7 +2383,7 @@ fn preflight_normal_721_predicts_the_deployed_address() {
         &salt,
     );
     assert_eq!(preflight_after.predicted_address, deployed);
-    assert!(preflight_after.errors.contains(&Error::DuplicateSalt));
+    assert!(preflight_after.errors.contains(&(Error::DuplicateSalt as u32)));
 
     assert_eq!(
         client.try_deploy_normal_721(
@@ -2386,12 +2425,12 @@ fn preflight_normal_721_reports_every_error_deploy_would_raise() {
         &salt,
     );
 
-    assert!(preflight.errors.contains(&Error::ContractPaused));
-    assert!(preflight.errors.contains(&Error::EmptyName));
-    assert!(preflight.errors.contains(&Error::EmptySymbol));
-    assert!(preflight.errors.contains(&Error::InvalidMaxSupply));
-    assert!(preflight.errors.contains(&Error::InvalidRoyaltyBps));
-    assert!(preflight.errors.contains(&Error::InvalidFeeBps));
+    assert!(preflight.errors.contains(&(Error::ContractPaused as u32)));
+    assert!(preflight.errors.contains(&(Error::EmptyName as u32)));
+    assert!(preflight.errors.contains(&(Error::EmptySymbol as u32)));
+    assert!(preflight.errors.contains(&(Error::InvalidMaxSupply as u32)));
+    assert!(preflight.errors.contains(&(Error::InvalidRoyaltyBps as u32)));
+    assert!(preflight.errors.contains(&(Error::InvalidFeeBps as u32)));
 
     // The real deploy call rejects on the first violation it checks
     // (contract-paused) — proving preflight is a superset, never blind to a
@@ -2434,7 +2473,7 @@ fn preflight_flags_insufficient_balance_for_the_flat_fee() {
         &salt,
     );
 
-    assert!(preflight.errors.contains(&Error::InsufficientFee));
+    assert!(preflight.errors.contains(&(Error::InsufficientFee as u32)));
     assert_eq!(preflight.required_fee, 1_000i128);
 
     // The real deploy call fails too — it attempts the token transfer, which
@@ -2485,6 +2524,7 @@ fn preflight_lazy_1155_predicts_the_deployed_address_and_matches_deploy_errors()
         &royalty_receiver,
         &0u32,
         &salt,
+        &String::from_str(&env, TEST_PASSPHRASE),
     );
 
     assert_eq!(preflight.predicted_address, deployed);

@@ -40,8 +40,11 @@ use soroban_sdk::{
 
 const TTL_THRESHOLD: u32 = 50_000;
 const TTL_BUMP: u32 = 100_000;
+const MAX_BPS: u32 = 10_000;
 /// Maximum number of vouchers accepted by a single redeem_batch call (#274).
 const MAX_BATCH_SIZE: u32 = 100;
+/// Maximum URI length in bytes (#276).
+const MAX_URI_LEN: u32 = 2048;
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
@@ -69,6 +72,22 @@ pub enum Error {
     AlreadyMigrated = 17,
     /// Unsupported version jump.
     UnsupportedMigration = 18,
+    /// Empty URI provided.
+    EmptyUri = 19,
+    /// URI exceeds maximum length.
+    UriTooLong = 20,
+    /// Zero amount provided.
+    ZeroAmount = 21,
+    /// Empty batch provided.
+    EmptyBatch = 22,
+    /// Batch exceeds maximum size.
+    BatchTooLarge = 23,
+    /// Duplicate voucher nonce within a single batch call.
+    DuplicateVoucherInBatch = 24,
+    /// Royalty or fee basis points exceed 100 % (10 000 bps).
+    InvalidBps = 25,
+    /// Approval has expired.
+    ApprovalExpired = 26,
 }
 
 // ─── Data types ───────────────────────────────────────────────────────────────
@@ -113,6 +132,8 @@ pub enum DataKey {
     PlatformFeeBps,
     Balance(Address, u64),
     ApprovedForAll(Address, Address),
+    /// Optional expiry (ledger sequence) for an operator-level approval.
+    ApprovedForAllExpiry(Address, Address),
     TokenUri(u64),
     TotalSupply(u64),
     MintedPerBuyer(Address, u64),
@@ -127,6 +148,11 @@ pub enum DataKey {
     /// Network passphrase bound at initialization for cross-network domain
     /// separation (#273).
     NetworkPassphrase, // String
+    // ── Versioned migration registry ──────────────────────────────────────
+    /// Persistent marker set to `true` once migration to `String` version completes.
+    MigrationDone(String),
+    /// Current on-chain contract version string.
+    ContractVersion,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -393,6 +419,9 @@ impl LazyMint1155 {
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(Error::AlreadyInitialized);
         }
+        if royalty_bps > MAX_BPS {
+            return Err(Error::InvalidBps);
+        }
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Creator, &creator);
         env.storage().instance().set(&DataKey::CurrentWasmHash, &BytesN::from_array(&env, &[0u8; 32]));
@@ -422,6 +451,7 @@ impl LazyMint1155 {
 
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         Self::extend_instance_ttl(&env);
+        Self::only_creator(&env)?;
         let old_wasm_hash: BytesN<32> = env
             .storage()
             .instance()
@@ -430,7 +460,7 @@ impl LazyMint1155 {
         env.storage()
             .instance()
             .set(&DataKey::CurrentWasmHash, &new_wasm_hash);
-        env.deployer().update_current_contract_wasm(&new_wasm_hash);
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
         env.events().publish(
             (symbol_short!("upgraded"),),
             (old_wasm_hash, new_wasm_hash),
@@ -704,8 +734,8 @@ impl LazyMint1155 {
 
     // ── Versioning & Migration ─────────────────────────────────────────────
 
-    pub fn version(_env: Env) -> &'static str {
-        "1.0.0"
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, "1.0.0")
     }
 
     pub fn contract_version(env: Env) -> Option<String> {
@@ -728,6 +758,18 @@ impl LazyMint1155 {
             .unwrap_or(false)
         {
             return Err(Error::AlreadyMigrated);
+        }
+
+        // Reject version jumps: if the instance already records a different
+        // version, the operator skipped a migration step.
+        if let Some(current) = env
+            .storage()
+            .instance()
+            .get::<DataKey, String>(&DataKey::ContractVersion)
+        {
+            if current != target {
+                return Err(Error::UnsupportedMigration);
+            }
         }
 
         // v1.0.0 migration body: nothing to migrate for the initial version.
@@ -813,16 +855,37 @@ impl LazyMint1155 {
 
     // ── Approvals ─────────────────────────────────────────────────────────
 
-    pub fn set_approval_for_all(env: Env, owner: Address, operator: Address, approved: bool) {
+    pub fn set_approval_for_all(
+        env: Env,
+        owner: Address,
+        operator: Address,
+        approved: bool,
+        expires_at: Option<u32>,
+    ) -> Result<(), Error> {
         Self::extend_instance_ttl(&env);
         owner.require_auth();
+        if let Some(exp) = expires_at {
+            if env.ledger().sequence() >= exp {
+                return Err(Error::ApprovalExpired);
+            }
+        }
         let key = DataKey::ApprovedForAll(owner.clone(), operator.clone());
         env.storage().persistent().set(&key, &approved);
         env.storage()
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+        let expiry_key = DataKey::ApprovedForAllExpiry(owner.clone(), operator.clone());
+        if let Some(exp) = expires_at {
+            env.storage().persistent().set(&expiry_key, &exp);
+            env.storage()
+                .persistent()
+                .extend_ttl(&expiry_key, TTL_THRESHOLD, TTL_BUMP);
+        } else {
+            env.storage().persistent().remove(&expiry_key);
+        }
         env.events()
             .publish((symbol_short!("appr_all"), owner), (operator, approved));
+        Ok(())
     }
 
     // ── Burn ──────────────────────────────────────────────────────────────
@@ -1002,6 +1065,9 @@ impl LazyMint1155 {
     pub fn update_royalty(env: Env, receiver: Address, bps: u32) -> Result<(), Error> {
         Self::extend_instance_ttl(&env);
         Self::only_creator(&env)?;
+        if bps > MAX_BPS {
+            return Err(Error::InvalidBps);
+        }
         env.storage()
             .instance()
             .set(&DataKey::RoyaltyReceiver, &receiver);
@@ -1014,6 +1080,9 @@ impl LazyMint1155 {
     pub fn register_edition(env: Env, token_id: u64, max_supply: u128) -> Result<(), Error> {
         Self::extend_instance_ttl(&env);
         Self::only_creator(&env)?;
+        if max_supply == 0 {
+            return Err(Error::ZeroAmount);
+        }
         let key = DataKey::EditionMaxSupply(token_id);
         if env.storage().persistent().has(&key) {
             return Err(Error::EditionAlreadyRegistered);
@@ -1168,10 +1237,24 @@ impl LazyMint1155 {
     }
 
     fn _is_approved_for_all(env: &Env, operator: &Address, owner: &Address) -> bool {
-        env.storage()
+        let approved: bool = env
+            .storage()
             .persistent()
             .get(&DataKey::ApprovedForAll(owner.clone(), operator.clone()))
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if !approved {
+            return false;
+        }
+        let expired = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u32>(&DataKey::ApprovedForAllExpiry(
+                owner.clone(),
+                operator.clone(),
+            ))
+            .map(|exp| env.ledger().sequence() >= exp)
+            .unwrap_or(false);
+        !expired
     }
 }
 

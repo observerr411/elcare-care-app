@@ -6,7 +6,7 @@ use crate::{
 };
 use ed25519_dalek::{Signer, SigningKey};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    testutils::{Address as _, Events as _, Ledger as _},
     xdr::ToXdr,
     Address, Bytes, BytesN, Env, String, Vec,
 };
@@ -34,6 +34,7 @@ fn setup(fee_bps: u32) -> (Env, LazyMint1155Client<'static>, Address, Address) {
         &Address::generate(&env),
         &fee_receiver,
         &fee_bps,
+        &String::from_str(&env, "Test SDF Network ; September 2015"),
     );
     (env, client, creator, fee_receiver)
 }
@@ -114,6 +115,7 @@ fn digest_byte_layout_is_stable() {
         &Address::generate(&env),
         &Address::generate(&env),
         &0u32,
+        &String::from_str(&env, "Test SDF Network ; September 2015"),
     );
     let currency = Address::generate(&env);
     let v = MintVoucher1155 {
@@ -713,6 +715,8 @@ fn zero_fee_bps_free_voucher_no_transfer() {
 
 #[test]
 fn replay_check_before_sig_verification() {
+    // Replay protection must fire before signature verification so that an
+    // already-redeemed nonce is rejected even when the caller supplies a bad sig.
     let (env, client, _creator, _fee) = setup(0);
     client.set_public_phase();
     let token_id = 1000u64;
@@ -723,12 +727,11 @@ fn replay_check_before_sig_verification() {
             .persistent()
             .set(&DataKey::RedeemedVoucher(nonce), &true);
     });
-
-    // Burn should succeed and write supply = 0, not amount (3).
-    client.burn(&buyer, &buyer, &token_id, &3u128);
-
-    // total_supply must be 0, not 3 (the old unwrap_or(amount) result).
-    assert_eq!(client.total_supply(&token_id), 0u128);
+    let buyer = Address::generate(&env);
+    let v = make_voucher(&env, token_id, nonce);
+    let bad_sig = BytesN::from_array(&env, &[0u8; 64]);
+    let res = client.try_redeem(&buyer, &v, &1u128, &bad_sig, &empty_proof(&env));
+    assert_eq!(res, Err(Ok(Error::VoucherAlreadyRedeemed)));
 }
 
 // ─── Issue #39 — Voucher nonce / replay protection tests ─────────────────────
@@ -861,7 +864,7 @@ mod migration {
     }
 
     #[test]
-    #[should_panic(expected = "AlreadyMigrated")]
+    #[should_panic(expected = "Error(Contract, #17)")]
     fn double_migrate_reverts() {
         let (_env, client, _creator, _fee_receiver) = setup(0);
         client.migrate();
@@ -873,16 +876,19 @@ mod migration {
         let (env, client, _creator, _fee_receiver) = setup(0);
         client.migrate();
 
+        use soroban_sdk::xdr::{ContractEventBody, ScVal};
         let events = env.events().all();
-        let found = events.iter().any(|(_, topics, _)| {
-            topics
-                .get(0)
-                .map(|v| {
-                    soroban_sdk::Symbol::try_from_val(&env, &v)
-                        .map(|s| s == soroban_sdk::symbol_short!("migrated"))
-                        .unwrap_or(false)
+        let found = events.events().iter().any(|e| {
+            if let ContractEventBody::V0(body) = &e.body {
+                body.topics.iter().any(|t| match t {
+                    ScVal::Symbol(s) => {
+                        core::str::from_utf8(s.0.as_slice()).unwrap_or("") == "migrated"
+                    }
+                    _ => false,
                 })
-                .unwrap_or(false)
+            } else {
+                false
+            }
         });
         assert!(found, "expected 'migrated' event");
     }
@@ -900,14 +906,12 @@ mod migration {
     #[test]
     fn redeemed_voucher_readable_after_migrate() {
         let (env, client, _creator, _fee_receiver) = setup(0);
-        let contract_id = env.register(crate::LazyMint1155, ());
 
-        // Register an edition and redeem a voucher pre-migration
         client.register_edition(&0u64, &500u128);
         client.set_public_phase();
 
         let voucher = make_voucher(&env, 0u64, 1u64);
-        let sig = sign_voucher(&env, &contract_id, &voucher);
+        let sig = sign_voucher(&env, &client.address, &voucher);
         let buyer = Address::generate(&env);
 
         client.redeem(&buyer, &voucher, &1u128, &sig, &empty_proof(&env));
@@ -922,13 +926,12 @@ mod migration {
     #[test]
     fn balance_readable_after_migrate() {
         let (env, client, _creator, _fee_receiver) = setup(0);
-        let contract_id = env.register(crate::LazyMint1155, ());
 
         client.register_edition(&0u64, &500u128);
         client.set_public_phase();
 
         let voucher = make_voucher(&env, 0u64, 10u64);
-        let sig = sign_voucher(&env, &contract_id, &voucher);
+        let sig = sign_voucher(&env, &client.address, &voucher);
         let buyer = Address::generate(&env);
 
         client.redeem(&buyer, &voucher, &5u128, &sig, &empty_proof(&env));
@@ -951,4 +954,67 @@ mod migration {
 
         assert!(client.is_voucher_revoked(&88u64));
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 9 — Security hardening regressions (#6)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn upgrade_non_creator_fails() {
+    let env = Env::default();
+    // No mock_all_auths — creator auth must be satisfied explicitly.
+    let contract_id = env.register(LazyMint1155, ());
+    let client = LazyMint1155Client::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let sk = creator_signing_key();
+    client.initialize(
+        &creator,
+        &BytesN::from_array(&env, &sk.verifying_key().to_bytes()),
+        &String::from_str(&env, "T"),
+        &0u32,
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &0u32,
+        &String::from_str(&env, "Test SDF Network ; September 2015"),
+    );
+    let new_hash = BytesN::from_array(&env, &[0xaau8; 32]);
+    let res = client.try_upgrade(&new_hash);
+    assert!(res.is_err());
+}
+
+#[test]
+fn initialize_royalty_bps_over_max_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LazyMint1155, ());
+    let client = LazyMint1155Client::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let sk = creator_signing_key();
+    let res = client.try_initialize(
+        &creator,
+        &BytesN::from_array(&env, &sk.verifying_key().to_bytes()),
+        &String::from_str(&env, "T"),
+        &10_001u32, // > MAX_BPS
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &0u32,
+        &String::from_str(&env, "Test SDF Network ; September 2015"),
+    );
+    assert_eq!(res, Err(Ok(Error::InvalidBps)));
+}
+
+#[test]
+fn update_royalty_over_max_fails() {
+    let (env, client, _creator, _fee) = setup(0);
+    let new_receiver = Address::generate(&env);
+    let res = client.try_update_royalty(&new_receiver, &10_001u32);
+    assert_eq!(res, Err(Ok(Error::InvalidBps)));
+}
+
+#[test]
+fn update_royalty_at_max_succeeds() {
+    let (env, client, _creator, _fee) = setup(0);
+    let new_receiver = Address::generate(&env);
+    assert!(client.try_update_royalty(&new_receiver, &10_000u32).is_ok());
 }

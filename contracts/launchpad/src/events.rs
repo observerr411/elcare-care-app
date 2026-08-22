@@ -1,4 +1,5 @@
 use soroban_sdk::{symbol_short, Address, BytesN, Env};
+use crate::types::CollectionKind;
 
 // ── Event Schema Versioning (Issue #278) ────────────────────────────────────
 //
@@ -144,6 +145,46 @@ pub fn publish_wasm_hashes_set(
             lazy_721.clone(),
             lazy_1155.clone(),
         ),
+    );
+}
+
+/// Emitted when the admin updates the WASM hash for a specific collection kind.
+///
+/// Topics: ("wasm_upd", kind_tag)
+/// Data:   (old_wasm: BytesN<32>, new_wasm: BytesN<32>)
+#[allow(deprecated)]
+pub fn publish_collection_wasm_updated(
+    env: &Env,
+    kind: &CollectionKind,
+    old_wasm: &BytesN<32>,
+    new_wasm: &BytesN<32>,
+) {
+    let tag = match kind {
+        CollectionKind::Normal721 => symbol_short!("n721"),
+        CollectionKind::Normal1155 => symbol_short!("n1155"),
+        CollectionKind::LazyMint721 => symbol_short!("l721"),
+        CollectionKind::LazyMint1155 => symbol_short!("l1155"),
+    };
+    env.events().publish(
+        (symbol_short!("wasm_upd"), tag),
+        (old_wasm.clone(), new_wasm.clone()),
+    );
+}
+
+/// Emitted when the admin triggers an upgrade on a specific deployed collection.
+///
+/// Topics: ("col_upgr", collection_address)
+/// Data:   (from_wasm: BytesN<32>, to_wasm: BytesN<32>)
+#[allow(deprecated)]
+pub fn publish_collection_upgraded(
+    env: &Env,
+    collection_address: &Address,
+    from_wasm: &BytesN<32>,
+    to_wasm: &BytesN<32>,
+) {
+    env.events().publish(
+        (symbol_short!("col_upgr"), collection_address.clone()),
+        (from_wasm.clone(), to_wasm.clone()),
     );
 }
 

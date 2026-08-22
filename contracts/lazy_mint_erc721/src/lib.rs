@@ -40,8 +40,11 @@ use soroban_sdk::{
 
 const TTL_THRESHOLD: u32 = 50_000;
 const TTL_BUMP: u32 = 100_000;
+const MAX_BPS: u32 = 10_000;
 /// Maximum number of vouchers accepted by a single redeem_batch call (#274).
 const MAX_BATCH_SIZE: u32 = 100;
+/// Maximum URI length in bytes (#276).
+const MAX_URI_LEN: u32 = 2048;
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
@@ -67,6 +70,16 @@ pub enum Error {
     AlreadyMigrated = 14,
     /// Unsupported version jump.
     UnsupportedMigration = 15,
+    /// Empty batch provided.
+    EmptyBatch = 16,
+    /// Batch exceeds maximum size.
+    BatchTooLarge = 17,
+    /// Duplicate voucher nonce within a single batch call.
+    DuplicateVoucherInBatch = 18,
+    /// Royalty or fee basis points exceed 100 % (10 000 bps).
+    InvalidBps = 19,
+    /// Approval has expired.
+    ApprovalExpired = 20,
 }
 
 // ─── Data types ───────────────────────────────────────────────────────────────
@@ -129,8 +142,12 @@ pub enum DataKey {
     Owner(u64),
     TokenUri(u64),
     Approved(u64),
+    /// Optional expiry (ledger sequence) for a per-token approval.
+    ApprovedExpiry(u64),
     BalanceOf(Address),
     ApprovedForAll(Address, Address),
+    /// Optional expiry (ledger sequence) for an operator-level approval.
+    ApprovedForAllExpiry(Address, Address),
     UsedVoucher(u64),    // nonce → bool  (redeemed)
     RevokedVoucher(u64), // nonce → bool  (creator-revoked, per-nonce)
     MerkleRoot,          // BytesN<32> — root of allowlist Merkle tree
@@ -138,6 +155,11 @@ pub enum DataKey {
     /// Network passphrase bound at initialization.
     /// Included in the signed digest to prevent cross-network replay (#273).
     NetworkPassphrase,   // String
+    // ── Versioned migration registry ──────────────────────────────────────
+    /// Persistent marker set to `true` once migration to `String` version completes.
+    MigrationDone(String),
+    /// Current on-chain contract version string.
+    ContractVersion,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -351,6 +373,9 @@ impl LazyMint721 {
         if env.storage().instance().has(&DataKey::Initialized) {
             return Err(Error::AlreadyInitialized);
         }
+        if royalty_bps > MAX_BPS {
+            return Err(Error::InvalidBps);
+        }
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Creator, &creator);
         env.storage().instance().set(&DataKey::CurrentWasmHash, &BytesN::from_array(&env, &[0u8; 32]));
@@ -386,6 +411,7 @@ impl LazyMint721 {
 
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         Self::extend_instance_ttl(&env);
+        Self::only_creator(&env)?;
         let old_wasm_hash: BytesN<32> = env
             .storage()
             .instance()
@@ -394,7 +420,7 @@ impl LazyMint721 {
         env.storage()
             .instance()
             .set(&DataKey::CurrentWasmHash, &new_wasm_hash);
-        env.deployer().update_current_contract_wasm(&new_wasm_hash);
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
         env.events().publish(
             (symbol_short!("upgraded"),),
             (old_wasm_hash, new_wasm_hash),
@@ -701,6 +727,9 @@ impl LazyMint721 {
         env.storage()
             .persistent()
             .remove(&DataKey::Approved(token_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ApprovedExpiry(token_id));
         Self::_transfer(&env, &from, &to, token_id)
     }
 
@@ -711,6 +740,7 @@ impl LazyMint721 {
         spender: Address,
         approved: Address,
         token_id: u64,
+        expires_at: Option<u32>,
     ) -> Result<(), Error> {
         Self::extend_instance_ttl(&env);
         spender.require_auth();
@@ -724,21 +754,57 @@ impl LazyMint721 {
         {
             return Err(Error::NotApproved);
         }
+        // Reject grants with an expiry already in the past.
+        if let Some(exp) = expires_at {
+            if env.ledger().sequence() >= exp {
+                return Err(Error::ApprovalExpired);
+            }
+        }
         env.storage()
             .persistent()
             .set(&DataKey::Approved(token_id), &approved);
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Approved(token_id), TTL_THRESHOLD, TTL_BUMP);
+        let expiry_key = DataKey::ApprovedExpiry(token_id);
+        if let Some(exp) = expires_at {
+            env.storage().persistent().set(&expiry_key, &exp);
+            env.storage()
+                .persistent()
+                .extend_ttl(&expiry_key, TTL_THRESHOLD, TTL_BUMP);
+        } else {
+            env.storage().persistent().remove(&expiry_key);
+        }
         Ok(())
     }
 
-    pub fn set_approval_for_all(env: Env, owner: Address, operator: Address, approved: bool) {
+    pub fn set_approval_for_all(
+        env: Env,
+        owner: Address,
+        operator: Address,
+        approved: bool,
+        expires_at: Option<u32>,
+    ) -> Result<(), Error> {
         Self::extend_instance_ttl(&env);
         owner.require_auth();
+        if let Some(exp) = expires_at {
+            if env.ledger().sequence() >= exp {
+                return Err(Error::ApprovalExpired);
+            }
+        }
         let key = DataKey::ApprovedForAll(owner.clone(), operator.clone());
         env.storage().persistent().set(&key, &approved);
         env.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+        let expiry_key = DataKey::ApprovedForAllExpiry(owner, operator);
+        if let Some(exp) = expires_at {
+            env.storage().persistent().set(&expiry_key, &exp);
+            env.storage()
+                .persistent()
+                .extend_ttl(&expiry_key, TTL_THRESHOLD, TTL_BUMP);
+        } else {
+            env.storage().persistent().remove(&expiry_key);
+        }
+        Ok(())
     }
 
     // ── View functions ────────────────────────────────────────────────────
@@ -827,14 +893,36 @@ impl LazyMint721 {
     }
 
     pub fn get_approved(env: Env, token_id: u64) -> Option<Address> {
-        env.storage().persistent().get(&DataKey::Approved(token_id))
+        let approved: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Approved(token_id))?;
+        // Return None if the approval has expired.
+        let expired = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u32>(&DataKey::ApprovedExpiry(token_id))
+            .map(|exp| env.ledger().sequence() >= exp)
+            .unwrap_or(false);
+        if expired { None } else { Some(approved) }
     }
 
     pub fn is_approved_for_all(env: Env, owner: Address, operator: Address) -> bool {
-        env.storage()
+        let approved: bool = env
+            .storage()
             .persistent()
-            .get(&DataKey::ApprovedForAll(owner, operator))
-            .unwrap_or(false)
+            .get(&DataKey::ApprovedForAll(owner.clone(), operator.clone()))
+            .unwrap_or(false);
+        if !approved {
+            return false;
+        }
+        let expired = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u32>(&DataKey::ApprovedForAllExpiry(owner, operator))
+            .map(|exp| env.ledger().sequence() >= exp)
+            .unwrap_or(false);
+        !expired
     }
 
     // ── Admin ─────────────────────────────────────────────────────────────
@@ -860,6 +948,9 @@ impl LazyMint721 {
     pub fn update_royalty(env: Env, receiver: Address, bps: u32) -> Result<(), Error> {
         Self::extend_instance_ttl(&env);
         Self::only_creator(&env)?;
+        if bps > MAX_BPS {
+            return Err(Error::InvalidBps);
+        }
         env.storage()
             .instance()
             .set(&DataKey::RoyaltyReceiver, &receiver);
@@ -903,8 +994,8 @@ impl LazyMint721 {
 
     // ── Versioning & Migration ─────────────────────────────────────────────
 
-    pub fn version(_env: Env) -> &'static str {
-        "1.0.0"
+    pub fn version(env: Env) -> String {
+        String::from_str(&env, "1.0.0")
     }
 
     pub fn contract_version(env: Env) -> Option<String> {
@@ -927,6 +1018,18 @@ impl LazyMint721 {
             .unwrap_or(false)
         {
             return Err(Error::AlreadyMigrated);
+        }
+
+        // Reject version jumps: if the instance already records a different
+        // version, the operator skipped a migration step.
+        if let Some(current) = env
+            .storage()
+            .instance()
+            .get::<DataKey, String>(&DataKey::ContractVersion)
+        {
+            if current != target {
+                return Err(Error::UnsupportedMigration);
+            }
         }
 
         // v1.0.0 migration body: nothing to migrate for the initial version.
@@ -1063,15 +1166,18 @@ impl LazyMint721 {
             .get::<DataKey, Address>(&DataKey::Approved(token_id))
         {
             if approved == *spender {
-                return Ok(());
+                let expired = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, u32>(&DataKey::ApprovedExpiry(token_id))
+                    .map(|exp| env.ledger().sequence() >= exp)
+                    .unwrap_or(false);
+                if !expired {
+                    return Ok(());
+                }
             }
         }
-        if env
-            .storage()
-            .persistent()
-            .get::<DataKey, bool>(&DataKey::ApprovedForAll(from.clone(), spender.clone()))
-            .unwrap_or(false)
-        {
+        if Self::is_approved_for_all(env.clone(), from.clone(), spender.clone()) {
             return Ok(());
         }
         Err(Error::NotApproved)

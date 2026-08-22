@@ -9,5 +9,7 @@ jobs:
         with:
           toolchain: stable
           target: wasm32-unknown-unknown
+      - run: rustup target add wasm32v1-none
       - run: cargo check --target wasm32-unknown-unknown
+      - run: cargo build --target wasm32v1-none --release -p collection-nft-erc721 -p collection-nft-erc1155 -p lazy-mint-erc721 -p lazy-mint-erc1155
       - run: cargo test --workspace

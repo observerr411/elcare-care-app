@@ -1100,20 +1100,20 @@ fn mint_succeeds_after_unpause() {
 }
 
 #[test]
-fn transfer_unaffected_when_paused() {
+fn transfer_blocked_when_paused() {
     let (env, client, _, _) = setup();
     let alice = Address::generate(&env);
     let bob = Address::generate(&env);
-    // Mint before pausing
     let id = client.mint(&alice, &String::from_str(&env, "uri"));
     client.pause();
-    // Transfer must still work while paused
-    client.transfer(&alice, &bob, &id);
-    assert_eq!(client.owner_of(&id), bob);
+    assert_eq!(
+        client.try_transfer(&alice, &bob, &id),
+        Err(Ok(Error::CollectionPaused))
+    );
 }
 
 #[test]
-fn transfer_from_unaffected_when_paused() {
+fn transfer_from_blocked_when_paused() {
     let (env, client, _, _) = setup();
     let alice = Address::generate(&env);
     let bob = Address::generate(&env);
@@ -1121,20 +1121,23 @@ fn transfer_from_unaffected_when_paused() {
     let id = client.mint(&alice, &String::from_str(&env, "uri"));
     client.approve(&alice, &spender, &id, &None::<u32>);
     client.pause();
-    client.transfer_from(&spender, &alice, &bob, &id);
-    assert_eq!(client.owner_of(&id), bob);
+    assert_eq!(
+        client.try_transfer_from(&spender, &alice, &bob, &id),
+        Err(Ok(Error::CollectionPaused))
+    );
 }
 
 #[test]
-fn burn_unaffected_when_paused() {
+fn burn_blocked_when_paused() {
     let (env, client, _, _) = setup();
     let alice = Address::generate(&env);
     let id = client.mint(&alice, &String::from_str(&env, "uri"));
     client.approve(&alice, &alice, &id, &None::<u32>);
     client.pause();
-    client.burn(&alice, &id);
-    let result = client.try_owner_of(&id);
-    assert_eq!(result, Err(Ok(Error::TokenNotFound)));
+    assert_eq!(
+        client.try_burn(&alice, &id),
+        Err(Ok(Error::CollectionPaused))
+    );
 }
 
 #[test]
@@ -1503,7 +1506,7 @@ mod migration {
     }
 
     #[test]
-    #[should_panic(expected = "AlreadyMigrated")]
+    #[should_panic(expected = "Error(Contract, #14)")]
     fn double_migrate_reverts_with_already_migrated() {
         let (_env, client, _contract_id, _creator) = setup();
 
@@ -1517,18 +1520,19 @@ mod migration {
         let (env, client, _contract_id, _creator) = setup();
         client.migrate();
 
+        use soroban_sdk::xdr::{ContractEventBody, ScVal};
         let events = env.events().all();
-        let found = events.iter().any(|(_, topics, _)| {
-            // topics is a Vec<Val>; the first entry is the symbol "migrated"
-            topics.len() >= 1
-                && topics
-                    .get(0)
-                    .map(|v| {
-                        soroban_sdk::Symbol::try_from_val(&env, &v)
-                            .map(|s| s == soroban_sdk::symbol_short!("migrated"))
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false)
+        let found = events.events().iter().any(|e| {
+            if let ContractEventBody::V0(body) = &e.body {
+                body.topics.iter().any(|t| match t {
+                    ScVal::Symbol(s) => {
+                        core::str::from_utf8(s.0.as_slice()).unwrap_or("") == "migrated"
+                    }
+                    _ => false,
+                })
+            } else {
+                false
+            }
         });
         assert!(found, "expected 'migrated' event");
     }
@@ -1571,4 +1575,87 @@ mod migration {
 
         assert_eq!(client.get_approved(&token_id), Some(bob));
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Security hardening regressions (#6)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn initialize_royalty_bps_over_max_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(NormalNFT721, ());
+    let client = NormalNFT721Client::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let royalty_receiver = Address::generate(&env);
+    let res = client.try_initialize(
+        &creator,
+        &String::from_str(&env, "Test"),
+        &String::from_str(&env, "T"),
+        &1000u64,
+        &10_001u32, // > MAX_BPS
+        &royalty_receiver,
+    );
+    assert_eq!(res, Err(Ok(Error::InvalidBps)));
+}
+
+#[test]
+fn update_royalty_over_max_fails() {
+    let (env, client, _contract_id, _creator) = setup();
+    let new_receiver = Address::generate(&env);
+    let res = client.try_update_royalty(&new_receiver, &10_001u32);
+    assert_eq!(res, Err(Ok(Error::InvalidBps)));
+}
+
+#[test]
+fn update_royalty_at_max_succeeds() {
+    let (env, client, _contract_id, _creator) = setup();
+    let new_receiver = Address::generate(&env);
+    assert!(client.try_update_royalty(&new_receiver, &10_000u32).is_ok());
+}
+
+#[test]
+fn batch_mint_empty_returns_error() {
+    let (_env, client, _contract_id, _creator) = setup();
+    let alice = Address::generate(&_env);
+    let ids: soroban_sdk::Vec<String> = soroban_sdk::Vec::new(&_env);
+    let res = client.try_batch_mint(&alice, &ids);
+    assert_eq!(res, Err(Ok(Error::EmptyBatch)));
+}
+
+#[test]
+fn metadata_frozen_blocks_set_base_uri() {
+    let (env, client, _contract_id, _creator) = setup();
+    client.freeze_metadata();
+    let res = client.try_set_base_uri(&String::from_str(&env, "https://new.example/"));
+    assert_eq!(res, Err(Ok(Error::MetadataFrozen)));
+}
+
+#[test]
+fn paused_collection_blocks_mint() {
+    let (env, client, _contract_id, _creator) = setup();
+    client.pause();
+    let alice = Address::generate(&env);
+    let res = client.try_mint(&alice, &String::from_str(&env, "uri"));
+    assert_eq!(res, Err(Ok(Error::CollectionPaused)));
+}
+
+#[test]
+fn approval_expiry_enforced() {
+    let (env, client, _contract_id, _creator) = setup();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let token_id = client.mint(&alice, &String::from_str(&env, "uri"));
+
+    // Approve bob with expiry at ledger sequence 100
+    client.approve(&alice, &bob, &token_id, &Some(100u32));
+    assert_eq!(client.get_approved(&token_id), Some(bob.clone()));
+
+    // Advance past expiry
+    env.ledger().with_mut(|li| li.sequence_number = 101);
+
+    // Transfer via expired approval must fail — _check_approved falls through to NotApproved
+    let res = client.try_transfer_from(&bob, &alice, &alice, &token_id);
+    assert_eq!(res, Err(Ok(Error::NotApproved)));
 }

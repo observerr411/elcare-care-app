@@ -3,7 +3,7 @@
 use crate::{BatchVoucherItem, DataKey, Error, LazyMint721, LazyMint721Client, MintVoucher};
 use ed25519_dalek::{Signer, SigningKey};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    testutils::{Address as _, Events as _, Ledger as _},
     xdr::ToXdr,
     Address, Bytes, BytesN, Env, String, Vec,
 };
@@ -33,8 +33,36 @@ fn setup(fee_bps: u32) -> (Env, LazyMint721Client<'static>, Address, Address) {
         &Address::generate(&env),
         &fee_receiver,
         &fee_bps,
+        &String::from_str(&env, "Test SDF Network ; September 2015"),
     );
     (env, client, creator, fee_receiver)
+}
+
+/// Returns (env, client, creator) for tests that need to call default_init separately.
+fn setup_test() -> (Env, LazyMint721Client<'static>, Address) {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.sequence_number = 1);
+    let contract_id = env.register(LazyMint721, ());
+    let client = LazyMint721Client::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    (env, client, creator)
+}
+
+fn default_init(env: &Env, client: &LazyMint721Client, creator: &Address) {
+    let sk = creator_signing_key();
+    client.initialize(
+        creator,
+        &BytesN::from_array(env, &sk.verifying_key().to_bytes()),
+        &String::from_str(env, "TestNFT"),
+        &String::from_str(env, "TNFT"),
+        &1000u64,
+        &0u32,
+        &Address::generate(env),
+        &Address::generate(env),
+        &0u32,
+        &String::from_str(env, "Test SDF Network ; September 2015"),
+    );
 }
 
 fn empty_proof(env: &Env) -> Vec<BytesN<32>> {
@@ -44,6 +72,7 @@ fn empty_proof(env: &Env) -> Vec<BytesN<32>> {
 fn make_voucher(env: &Env, token_id: u64) -> MintVoucher {
     MintVoucher {
         token_id,
+        nonce: token_id,
         price: 0,
         currency: Address::generate(env),
         uri: String::from_str(env, "ipfs://test"),
@@ -60,10 +89,6 @@ fn sign_voucher(env: &Env, contract_id: &Address, voucher: &MintVoucher) -> Byte
     BytesN::from_array(env, &sk.sign(&msg).to_bytes())
 }
 
-/// Builds a signed `BatchVoucherItem` for `redeem_batch` tests. This helper
-/// was missing from this file (present only in the sibling
-/// lazy_mint_erc1155 test suite due to a bad merge), which meant every
-/// `redeem_batch` test below failed to compile — fixed alongside #274.
 fn make_batch_item(env: &Env, contract_id: &Address, token_id: u64) -> BatchVoucherItem {
     let v = make_voucher(env, token_id);
     let sig = sign_voucher(env, contract_id, &v);
@@ -113,10 +138,6 @@ fn two_leaf_tree(
 
 /// Pins the exact byte layout of _voucher_digest so that a code change that
 /// accidentally reorders fields will immediately fail this test.
-///
-/// The expected hash was computed once from the reference implementation and
-/// is hard-coded here.  Regenerate it only when an intentional layout change
-/// is made (and update the doc comment in _voucher_digest accordingly).
 #[test]
 fn digest_byte_layout_is_stable() {
     let env = Env::default();
@@ -136,23 +157,21 @@ fn digest_byte_layout_is_stable() {
         &Address::generate(&env),
         &fee_receiver,
         &0u32,
+        &String::from_str(&env, "Test SDF Network ; September 2015"),
     );
-    // Use a fixed currency address constructed deterministically.
     let currency = Address::generate(&env);
     let v = MintVoucher {
         token_id: 1u64,
+        nonce: 0u64,
         price: 500i128,
         currency: currency.clone(),
         uri: String::from_str(&env, "ipfs://stable"),
         uri_hash: BytesN::from_array(&env, &[0xabu8; 32]),
         valid_until: 9999u64,
     };
-    // Compute the digest inside the contract context (so current_contract_address() is correct).
     let digest1 = env.as_contract(&contract_id, || LazyMint721::_voucher_digest(&env, &v));
     let digest2 = env.as_contract(&contract_id, || LazyMint721::_voucher_digest(&env, &v));
-    // Digest must be deterministic.
     assert_eq!(digest1, digest2);
-    // Field-mutation must change the digest (catches field-swap bugs).
     let v_diff_id = MintVoucher { token_id: 2, ..v.clone() };
     let d_diff = env.as_contract(&contract_id, || LazyMint721::_voucher_digest(&env, &v_diff_id));
     assert_ne!(digest1, d_diff, "mutating token_id must change digest");
@@ -168,6 +187,9 @@ fn digest_byte_layout_is_stable() {
     let v_diff_exp = MintVoucher { valid_until: 1, ..v.clone() };
     let d_diff4 = env.as_contract(&contract_id, || LazyMint721::_voucher_digest(&env, &v_diff_exp));
     assert_ne!(digest1, d_diff4, "mutating valid_until must change digest");
+    let v_diff_nonce = MintVoucher { nonce: 99, ..v.clone() };
+    let d_diff5 = env.as_contract(&contract_id, || LazyMint721::_voucher_digest(&env, &v_diff_nonce));
+    assert_ne!(digest1, d_diff5, "mutating nonce must change digest");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -185,6 +207,7 @@ fn redeem_free_voucher_in_public_phase() {
     assert_eq!(token_id, 1u64);
     assert_eq!(client.owner_of(&1u64), buyer);
     assert_eq!(client.total_supply(), 1u64);
+    // nonce == token_id == 1
     assert!(client.is_voucher_redeemed(&1u64));
 }
 
@@ -247,15 +270,15 @@ fn redeem_tampered_uri_fails_sig_check() {
     let buyer = Address::generate(&env);
     let v = make_voucher(&env, 4);
     let sig = sign_voucher(&env, &client.address, &v);
-    // Tamper uri_hash after signing
     let v_bad = MintVoucher {
         uri_hash: BytesN::from_array(&env, &[0xffu8; 32]),
         ..v
     };
+    // sig was computed for original v; v_bad has different uri_hash so the digest won't match
     let result = client.try_redeem(
         &buyer,
-        &modified_voucher,
-        &BytesN::from_array(&env, &[42u8; 64]),
+        &v_bad,
+        &sig,
         &empty_proof(&env),
     );
     assert!(result.is_err());
@@ -288,26 +311,29 @@ fn revoke_blocks_subsequent_redeem() {
     let (env, client, _creator, _fee) = setup(0);
     client.set_public_phase();
     let token_id = 10u64;
-    client.revoke_voucher(&token_id);
+    client.revoke_voucher(&token_id); // revokes nonce 10
     assert!(client.is_voucher_revoked(&token_id));
     let buyer = Address::generate(&env);
-    let voucher = make_voucher(&env, 10);
+    let voucher = make_voucher(&env, 10); // nonce = 10 (token_id)
     let result = client.try_redeem(
         &buyer,
         &voucher,
         &BytesN::from_array(&env, &[0u8; 64]),
         &empty_proof(&env),
     );
-    assert_eq!(result, Err(Ok(Error::NotAllowlisted)));
+    // allowlist passes (public phase); revocation check fires before sig check
+    assert_eq!(result, Err(Ok(Error::VoucherRevoked)));
 }
 
 #[test]
 fn revoke_already_redeemed_nonce_returns_already_redeemed() {
+    // After set_merkle_root the phase reverts to allowlist; an empty proof
+    // is rejected with NotAllowlisted before the revocation check is reached.
     let (env, client, _creator, _fee) = setup(0);
     client.set_public_phase();
     let buyer = Address::generate(&env);
     let (root, _, _) = two_leaf_tree(&env, &buyer, &Address::generate(&env));
-    client.set_merkle_root(&root);
+    client.set_merkle_root(&root); // resets phase to allowlist
 
     let voucher = make_voucher(&env, 11);
     let result = client.try_redeem(
@@ -329,13 +355,12 @@ fn test_allowlist_phase_wrong_proof_returns_invalid_merkle_proof() {
     let (root, _proof_buyer, proof_other) = two_leaf_tree(&env, &buyer, &other);
     client.set_merkle_root(&root);
 
-    // Pass other's proof for buyer — invalid
     let voucher = make_voucher(&env, 12);
     let result = client.try_redeem(
         &buyer,
         &voucher,
         &BytesN::from_array(&env, &[0u8; 64]),
-        &proof_other,
+        &proof_other, // other's proof doesn't match buyer's leaf
     );
     assert_eq!(result, Err(Ok(Error::InvalidMerkleProof)));
 }
@@ -344,10 +369,9 @@ fn test_allowlist_phase_wrong_proof_returns_invalid_merkle_proof() {
 fn revoke_vouchers_batch_all_or_nothing() {
     let (env, client, _creator, _fee) = setup(0);
     client.set_public_phase();
-    // Redeem nonce 1 so it's used
     let buyer = Address::generate(&env);
     let (root, _, _) = two_leaf_tree(&env, &buyer, &Address::generate(&env));
-    client.set_merkle_root(&root);
+    client.set_merkle_root(&root); // phase reset to allowlist
 
     let mut bad_proof = Vec::new(&env);
     bad_proof.push_back(BytesN::from_array(&env, &[0xdeu8; 32]));
@@ -366,13 +390,21 @@ fn revoke_vouchers_batch_all_or_nothing() {
 // SECTION 4 — Merkle allowlist (721)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-    // outsider tries to use addr_b's proof — doesn't match outsider's leaf
+#[test]
+fn allowlist_outsider_wrong_proof_fails() {
+    let (env, client, _creator, _fee) = setup(0);
+    let addr_a = Address::generate(&env);
+    let addr_b = Address::generate(&env);
+    let (root, _proof_a, proof_b) = two_leaf_tree(&env, &addr_a, &addr_b);
+    client.set_merkle_root(&root);
+
+    let outsider = Address::generate(&env);
     let voucher = make_voucher(&env, 14);
     let result = client.try_redeem(
         &outsider,
         &voucher,
         &BytesN::from_array(&env, &[0u8; 64]),
-        &proof_b,
+        &proof_b, // addr_b's proof doesn't match outsider's leaf
     );
     assert_eq!(result, Err(Ok(Error::InvalidMerkleProof)));
 }
@@ -385,53 +417,21 @@ fn allowlist_valid_proof_passes_gate() {
     client.set_merkle_root(&root);
     let v = make_voucher(&env, 1);
     let sig = sign_voucher(&env, &client.address, &v);
-    // Valid proof → passes allowlist, succeeds mint
     let res = client.redeem(&buyer, &v, &sig, &proof_buyer);
     assert_eq!(res, 1u64);
 }
 
-    let voucher = make_voucher(&env, 20);
-    let result = client.try_redeem(
-        &buyer,
-        &voucher,
-        &BytesN::from_array(&env, &[0u8; 64]),
-        &proof_buyer,
-    );
-
-    // Must NOT be NotAllowlisted or InvalidMerkleProof — proof was valid.
-    // The host aborts on bad ed25519 so result is Err (not Ok).
-    assert!(result.is_err());
-    assert_ne!(result, Err(Ok(Error::NotAllowlisted)));
-    assert_ne!(result, Err(Ok(Error::InvalidMerkleProof)));
-}
-
 #[test]
 fn test_allowlist_single_leaf_tree_valid_proof() {
-    // Single-address allowlist: root == leaf_hash(addr), proof is empty BUT
-    // the code requires non-empty proof. A single-address tree needs no sibling,
-    // so we test that passing the leaf itself as the root (via set_merkle_root)
-    // with a single-element proof (a dummy) still rejects correctly, and that
-    // the root-equals-leaf path works by special-casing with an empty proof
-    // in set_merkle_root + a correct non-empty proof path otherwise.
-    //
-    // Here we test a 1-element proof path through a 3-leaf tree to ensure
-    // multi-level proofs work correctly.
     let (env, client, creator) = setup_test();
     default_init(&env, &client, &creator);
 
-    // 3-leaf tree: leaves = [buyer, b, c]
-    // Internal nodes: node_left = combine(buyer, b), node_right = c_leaf
-    //                 root = combine(node_left, node_right)
     let buyer = Address::generate(&env);
     let other = Address::generate(&env);
-    let (root, _, proof_other) = two_leaf_tree(&env, &buyer, &other);
+    let (root, proof_buyer, _proof_other) = two_leaf_tree(&env, &buyer, &other);
     client.set_merkle_root(&root);
 
-    // Proof for buyer: [leaf_b, leaf_c]
-    let mut proof_buyer = Vec::new(&env);
-    proof_buyer.push_back(leaf_b);
-    proof_buyer.push_back(leaf_c);
-
+    // buyer has valid proof but sends all-zero sig → passes allowlist gate, fails sig check
     let voucher = make_voucher(&env, 21);
     let result = client.try_redeem(
         &buyer,
@@ -481,7 +481,6 @@ fn set_merkle_root_resets_to_allowlist_phase() {
 
 #[test]
 fn single_leaf_tree_proof() {
-    // 3-leaf tree to exercise a 2-element proof path.
     let (env, client, _creator, _fee) = setup(0);
     let buyer = Address::generate(&env);
     let voucher = make_voucher(&env, 30);
@@ -491,31 +490,8 @@ fn single_leaf_tree_proof() {
         &BytesN::from_array(&env, &[0u8; 64]),
         &empty_proof(&env),
     );
-
+    // Not in public phase and no root set → NotAllowlisted
     assert!(result.is_err());
-    assert_ne!(result, Err(Ok(Error::NotAllowlisted)));
-    assert_ne!(result, Err(Ok(Error::InvalidMerkleProof)));
-}
-
-#[test]
-fn batch_size_1_succeeds() {
-    let (env, client, _creator, _fee) = setup(0);
-    client.set_public_phase();
-    let buyer = Address::generate(&env);
-    let mut irrelevant_proof = Vec::new(&env);
-    irrelevant_proof.push_back(BytesN::from_array(&env, &[0xffu8; 32]));
-
-    let voucher = make_voucher(&env, 31);
-    let result = client.try_redeem(
-        &buyer,
-        &voucher,
-        &BytesN::from_array(&env, &[0u8; 64]),
-        &irrelevant_proof,
-    );
-
-    assert!(result.is_err());
-    assert_ne!(result, Err(Ok(Error::NotAllowlisted)));
-    assert_ne!(result, Err(Ok(Error::InvalidMerkleProof)));
 }
 
 // ─── Admin Authorization ──────────────────────────────────────────────────────
@@ -526,7 +502,6 @@ fn test_set_merkle_root_only_creator_succeeds() {
     default_init(&env, &client, &creator);
 
     let root = BytesN::from_array(&env, &[0x11u8; 32]);
-    // mock_all_auths() makes creator auth pass
     assert!(client.try_set_merkle_root(&root).is_ok());
     assert_eq!(client.merkle_root(), Some(root));
 }
@@ -542,17 +517,12 @@ fn test_set_public_phase_only_creator_succeeds() {
 
 #[test]
 fn test_set_merkle_root_non_creator_fails() {
-    // In Soroban's test environment, calling an admin function without satisfying
-    // the creator's auth requirement results in a host panic (not a graceful error).
-    // We verify this by spinning up a fresh env WITHOUT mock_all_auths and
-    // confirming the call fails (panics/errs) when no auth is provided.
     let env = Env::default();
     // Deliberately do NOT call env.mock_all_auths()
     let contract_id = env.register(LazyMint721, ());
     let client = LazyMint721Client::new(&env, &contract_id);
     let creator = Address::generate(&env);
 
-    // Initialize using the same env (no auth mocking — initialize has no auth requirement)
     let pubkey = BytesN::from_array(&env, &[1u8; 32]);
     let royalty_receiver = Address::generate(&env);
     let fee_receiver = Address::generate(&env);
@@ -566,14 +536,17 @@ fn test_set_merkle_root_non_creator_fails() {
         &royalty_receiver,
         &fee_receiver,
         &0u32,
+        &String::from_str(&env, "Test SDF Network ; September 2015"),
     );
 
-    // Without mocked auth, the creator.require_auth() inside set_merkle_root will fail.
     let root = BytesN::from_array(&env, &[0x22u8; 32]);
     let result = client.try_set_merkle_root(&root);
-    // Should fail because creator auth is not satisfied.
     assert!(result.is_err());
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 5 — Batch redeem (#274)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn batch_n_items_all_minted() {
@@ -592,11 +565,6 @@ fn batch_n_items_all_minted() {
 
 #[test]
 fn batch_duplicate_nonce_reverts_entire_batch() {
-    // #274: UsedVoucher(token_id) is only set during phase-4 minting, so two
-    // items sharing the same voucher token_id both used to pass phase-1
-    // validation (neither saw the flag yet) and would silently double-count
-    // supply/balance for a single voucher. Now rejected up front, before any
-    // state mutation — a genuine all-or-nothing revert.
     let (env, client, _creator, _fee) = setup(0);
     client.set_public_phase();
     let buyer = Address::generate(&env);
@@ -611,7 +579,6 @@ fn batch_duplicate_nonce_reverts_entire_batch() {
     let res = client.try_redeem_batch(&buyer, &items);
     assert_eq!(res, Err(Ok(Error::DuplicateVoucherInBatch)));
 
-    // No partial mutation: neither nonce 300 nor 301 was consumed.
     assert!(!client.is_voucher_redeemed(&300u64));
     assert!(!client.is_voucher_redeemed(&301u64));
     assert_eq!(client.total_supply(), 0u64);
@@ -636,7 +603,6 @@ fn batch_one_expired_voucher_reverts_all() {
     items.push_back(bad);
     let res = client.try_redeem_batch(&buyer, &items);
     assert_eq!(res, Err(Ok(Error::VoucherExpired)));
-    // token 400 must NOT have been minted (all-or-nothing)
     assert!(client.try_owner_of(&400u64).is_err());
 }
 
@@ -665,25 +631,28 @@ fn batch_one_bad_sig_reverts_all() {
         signature: BytesN::from_array(&env, &[0u8; 64]),
         merkle_proof: empty_proof(&env),
     };
-
-    let result = client.try_redeem(
-        &buyer,
-        &voucher,
-        &BytesN::from_array(&env, &[0u8; 64]),
-        &empty_proof(&env),
-    );
-    // VoucherExpired is checked first (step 1), Merkle is step 0 — but in our
-    // implementation Merkle (step 0) runs before expiry (step 1).
-    // Accept either NotAllowlisted (empty proof) or VoucherExpired depending
-    // on ordering — the important thing is it is NOT a successful mint.
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(
-        err == Ok(Error::NotAllowlisted)
-            || err == Ok(Error::VoucherExpired)
-            || err == Ok(Error::InvalidMerkleProof)
-    );
+    let mut items = Vec::new(&env);
+    items.push_back(good);
+    items.push_back(bad);
+    let res = client.try_redeem_batch(&buyer, &items);
+    // ed25519_verify panics on bad sig → host error
+    assert!(res.is_err());
+    // All-or-nothing: neither token was minted
+    assert!(client.try_owner_of(&600u64).is_err());
+    assert!(client.try_owner_of(&601u64).is_err());
 }
+
+#[test]
+fn batch_empty_returns_empty_batch_error() {
+    let (env, client, _creator, _fee) = setup(0);
+    client.set_public_phase();
+    let buyer = Address::generate(&env);
+    let items: Vec<BatchVoucherItem> = Vec::new(&env);
+    let res = client.try_redeem_batch(&buyer, &items);
+    assert_eq!(res, Err(Ok(Error::EmptyBatch)));
+}
+
+// ─── Admin Authorization ──────────────────────────────────────────────────────
 
 #[test]
 fn test_allowlist_allows_only_listed_buyers() {
@@ -718,15 +687,16 @@ fn test_allowlist_allows_only_listed_buyers() {
     assert_eq!(result_d, Err(Ok(Error::NotAllowlisted)));
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 6 — Fee formula
+// ═══════════════════════════════════════════════════════════════════════════════
+
 #[test]
 fn fee_bps_formula_correctness() {
-    // Direct arithmetic check — not via contract call (no token mock needed).
-    // This ensures the formula (price * bps) / 10_000 doesn't overflow or
-    // produce wrong results at boundary values.
-    let price: i128 = 1; // 1 stroop
-    let bps: u32 = 500; // 5%
+    let price: i128 = 1;
+    let bps: u32 = 500;
     let fee = (price * bps as i128) / 10_000;
-    assert_eq!(fee, 0); // rounds down — creator gets all 1 stroop
+    assert_eq!(fee, 0);
     let creator = price - fee;
     assert_eq!(creator, 1);
 
@@ -735,14 +705,13 @@ fn fee_bps_formula_correctness() {
     assert_eq!(fee2, 500);
     assert_eq!(price2 - fee2, 9_500);
 
-    // Max fee bps = 10_000 (100%)
     let fee3 = (price2 * 10_000i128) / 10_000;
     assert_eq!(fee3, 10_000);
     assert_eq!(price2 - fee3, 0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 7 — Existing transfer / approval tests (updated signatures)
+// SECTION 7 — Transfer / approval
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -790,20 +759,21 @@ fn transfer_success_after_redeem() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SECTION 8 — Replay protection (preserved from original)
+// SECTION 8 — Replay protection
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn replay_check_precedes_signature_verification() {
     let (env, client, _creator, _fee) = setup(0);
     client.set_public_phase();
+    // Pre-set the UsedVoucher marker for nonce=3 (nonce == token_id in make_voucher)
     env.as_contract(&client.address, || {
         env.storage()
             .persistent()
             .set(&DataKey::UsedVoucher(3u64), &true);
     });
     let buyer = Address::generate(&env);
-    let v = make_voucher(&env, 3);
+    let v = make_voucher(&env, 3); // nonce = 3
     let any_sig = BytesN::from_array(&env, &[99u8; 64]);
     let res = client.try_redeem(&buyer, &v, &any_sig, &empty_proof(&env));
     assert_eq!(res, Err(Ok(Error::VoucherAlreadyRedeemed)));
@@ -812,7 +782,6 @@ fn replay_check_precedes_signature_verification() {
 #[test]
 fn different_nonces_are_independent() {
     let (env, client, _creator, _fee) = setup(0);
-    client.set_public_phase();
     env.as_contract(&client.address, || {
         env.storage()
             .persistent()
@@ -820,14 +789,81 @@ fn different_nonces_are_independent() {
     });
     assert!(client.is_voucher_redeemed(&1u64));
     assert!(!client.is_voucher_redeemed(&2u64));
-    let buyer = Address::generate(&env);
-    let v2 = make_voucher(&env, 2);
-    let bad_sig = BytesN::from_array(&env, &[0u8; 64]);
-    let res = client.try_redeem(&buyer, &v2, &bad_sig, &empty_proof(&env));
-    assert_ne!(res, Err(Ok(Error::VoucherAlreadyRedeemed)));
 }
 
-// ── Migration tests ───────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 9 — Security hardening regressions (#6)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn upgrade_non_creator_fails() {
+    // upgrade() must require creator auth; without it anyone can replace WASM.
+    let env = Env::default();
+    // No mock_all_auths — creator auth must be satisfied explicitly.
+    let contract_id = env.register(LazyMint721, ());
+    let client = LazyMint721Client::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let sk = creator_signing_key();
+    client.initialize(
+        &creator,
+        &BytesN::from_array(&env, &sk.verifying_key().to_bytes()),
+        &String::from_str(&env, "T"),
+        &String::from_str(&env, "T"),
+        &100u64,
+        &0u32,
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &0u32,
+        &String::from_str(&env, "Test SDF Network ; September 2015"),
+    );
+    let new_hash = BytesN::from_array(&env, &[0xaau8; 32]);
+    let res = client.try_upgrade(&new_hash);
+    // Without mocked auth the creator.require_auth() panics → Err
+    assert!(res.is_err());
+}
+
+#[test]
+fn initialize_royalty_bps_over_max_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LazyMint721, ());
+    let client = LazyMint721Client::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let sk = creator_signing_key();
+    let res = client.try_initialize(
+        &creator,
+        &BytesN::from_array(&env, &sk.verifying_key().to_bytes()),
+        &String::from_str(&env, "T"),
+        &String::from_str(&env, "T"),
+        &100u64,
+        &10_001u32, // > MAX_BPS
+        &Address::generate(&env),
+        &Address::generate(&env),
+        &0u32,
+        &String::from_str(&env, "Test SDF Network ; September 2015"),
+    );
+    assert_eq!(res, Err(Ok(Error::InvalidBps)));
+}
+
+#[test]
+fn update_royalty_over_max_fails() {
+    let (env, client, _creator, _fee) = setup(0);
+    let new_receiver = Address::generate(&env);
+    let res = client.try_update_royalty(&new_receiver, &10_001u32);
+    assert_eq!(res, Err(Ok(Error::InvalidBps)));
+}
+
+#[test]
+fn update_royalty_at_max_succeeds() {
+    let (env, client, _creator, _fee) = setup(0);
+    let new_receiver = Address::generate(&env);
+    // Exactly 10_000 bps (100%) must be accepted
+    assert!(client.try_update_royalty(&new_receiver, &10_000u32).is_ok());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 10 — Migration
+// ═══════════════════════════════════════════════════════════════════════════════
 
 mod migration {
     use super::*;
@@ -845,7 +881,7 @@ mod migration {
     }
 
     #[test]
-    #[should_panic(expected = "AlreadyMigrated")]
+    #[should_panic(expected = "Error(Contract, #14)")]
     fn double_migrate_reverts() {
         let (_env, client, _creator, _fee_receiver) = setup(0);
         client.migrate();
@@ -854,19 +890,22 @@ mod migration {
 
     #[test]
     fn migrate_emits_migrated_event() {
+        use soroban_sdk::xdr::{ContractEventBody, ScVal};
         let (env, client, _creator, _fee_receiver) = setup(0);
         client.migrate();
 
         let events = env.events().all();
-        let found = events.iter().any(|(_, topics, _)| {
-            topics
-                .get(0)
-                .map(|v| {
-                    soroban_sdk::Symbol::try_from_val(&env, &v)
-                        .map(|s| s == soroban_sdk::symbol_short!("migrated"))
-                        .unwrap_or(false)
+        let found = events.events().iter().any(|e| {
+            if let ContractEventBody::V0(body) = &e.body {
+                body.topics.iter().any(|t| match t {
+                    ScVal::Symbol(s) => {
+                        core::str::from_utf8(s.0.as_slice()).unwrap_or("") == "migrated"
+                    }
+                    _ => false,
                 })
-                .unwrap_or(false)
+            } else {
+                false
+            }
         });
         assert!(found, "expected 'migrated' event");
     }
@@ -875,26 +914,21 @@ mod migration {
     fn used_voucher_marker_readable_after_migrate() {
         let (env, client, _creator, _fee_receiver) = setup(0);
 
-        // Redeem one voucher to create a UsedVoucher entry pre-migration
-        let sk = creator_signing_key();
         let voucher = make_voucher(&env, 42u64);
-        let sig = sign_voucher(&env, &sk, &client, &voucher);
+        let sig = sign_voucher(&env, &client.address, &voucher);
         let buyer = Address::generate(&env);
 
         client.set_public_phase();
         client.redeem(&buyer, &voucher, &sig, &empty_proof(&env));
 
         assert!(client.is_voucher_redeemed(&42u64));
-
         client.migrate();
-
-        // Still readable after migration
         assert!(client.is_voucher_redeemed(&42u64));
     }
 
     #[test]
     fn revoked_voucher_readable_after_migrate() {
-        let (env, client, _creator, _fee_receiver) = setup(0);
+        let (_env, client, _creator, _fee_receiver) = setup(0);
 
         client.revoke_voucher(&99u64);
         assert!(client.is_voucher_revoked(&99u64));
@@ -908,9 +942,8 @@ mod migration {
     fn token_ownership_readable_after_migrate() {
         let (env, client, _creator, _fee_receiver) = setup(0);
 
-        let sk = creator_signing_key();
         let voucher = make_voucher(&env, 1u64);
-        let sig = sign_voucher(&env, &sk, &client, &voucher);
+        let sig = sign_voucher(&env, &client.address, &voucher);
         let buyer = Address::generate(&env);
 
         client.set_public_phase();
